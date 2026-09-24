@@ -7,9 +7,9 @@ let intent = 'submit'; // 'submit' | 'vote'
 
 export function landing(root) {
   root.innerHTML = `
-    <div class="screen" style="${photoStyle(SEED_PHOTOS[0])}">
-      <div class="scroll" style="display:flex; flex-direction:column; color:#F3EEE3;">
-        <div style="position:relative; height:342px; overflow:hidden; flex:none;">
+    <div class="screen landing" style="${photoStyle(SEED_PHOTOS[0])}">
+      <div class="scroll landing-scroll" style="display:flex; flex-direction:column; color:#F3EEE3;">
+        <div class="landing-hero" style="position:relative; height:342px; overflow:hidden; flex:none;">
           <div style="position:absolute; inset:0; ${photoStyle(SEED_PHOTOS[0])} opacity:.85;"></div>
           <div style="position:absolute; inset:0; background:linear-gradient(180deg, rgba(21,19,15,.30) 0%, rgba(21,19,15,.78) 62%, #15130F 100%);"></div>
           <div style="position:absolute; left:26px; top:26px; display:flex; align-items:center; gap:12px;">
@@ -17,7 +17,7 @@ export function landing(root) {
             <span style="font-family:'Bodoni Moda',serif; font-size:13px; letter-spacing:.30em; text-transform:uppercase;">ArtUP</span>
           </div>
         </div>
-        <div style="padding:0 26px; margin-top:-52px; position:relative; background:#15130F; flex:1;">
+        <div class="landing-copy" style="padding:0 26px; margin-top:-52px; position:relative; background:#15130F; flex:1;">
           <p style="margin:0 0 14px; font-size:10.5px; letter-spacing:.26em; text-transform:uppercase; color:#A6842C;">Queen's University · Class of 2027</p>
           <h1 class="h-serif" style="font-size:40px; line-height:1.02; margin-bottom:16px; color:#F7F2E7;">Campus Canvas</h1>
           <p style="margin:0 0 30px; font-size:15px; font-weight:300; line-height:1.7; color:#CFC7B6;">Three photographs of the places that defined your years here. Kingston artists turn the most-loved images into original works.</p>
@@ -36,7 +36,7 @@ export function landing(root) {
             </div>
           </div>
         </div>
-        <div style="padding:24px 26px 34px; background:#15130F;">
+        <div class="landing-actions" style="padding:24px 26px 34px; background:#15130F;">
           <button class="btn btn-gold-dark" id="enter-btn">Enter the contest</button>
           <button class="btn btn-outline-light" id="vote-only-btn" style="margin-top:12px;">Just here to vote</button>
           <p style="margin:16px 0 0; text-align:center; font-size:11.5px; font-weight:300; color:#7D7360;">No app to download · Runs in your browser</p>
