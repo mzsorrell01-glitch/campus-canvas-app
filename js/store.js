@@ -34,12 +34,14 @@ export function photoStyle(photo) {
 
 let sb = null;
 let mode = 'student';
+// Outcome of coming back from a magic link: null, 'ok' or an error message.
+let loginResult = null;
 let state = emptyState();
 
 function emptyState() {
   return {
     participants: {}, images: {}, votes: [], notices: [], noticeReads: [],
-    feedback: [], auditLog: [], currentParticipantId: null,
+    feedback: [], auditLog: [], publicNotes: [], currentParticipantId: null,
   };
 }
 
@@ -56,6 +58,8 @@ function reportError(err) {
 const toParticipant = (r) => ({
   id: r.id, name: r.name, email: r.email, registeredAt: r.registered_at,
   termsVersion: r.terms_version, termsAcceptedAt: r.terms_accepted_at, points: r.points,
+  // Rows from before the access column existed count as approved.
+  access: r.access || 'approved', isSeed: !!r.is_seed,
 });
 const toImage = (r) => ({
   id: r.id, participantId: r.participant_id, source: r.source, credit: r.credit,
@@ -65,6 +69,8 @@ const toImage = (r) => ({
 });
 const toVote = (r) => ({
   participantId: r.participant_id, imageId: r.image_id, value: r.value, note: r.note, votedAt: r.voted_at,
+  // Notes from before sharing existed stay private.
+  noteStatus: r.note_status || 'private',
 });
 const toNotice = (r) => ({
   id: r.id, title: r.title, body: r.body, category: r.category, ctaLabel: r.cta_label,
@@ -89,6 +95,25 @@ async function rpc(name, args = {}) {
   return q(sb.rpc(name, args));
 }
 
+// The admin console's email functions (campus-canvas-app/api), called with
+// the admin's own login so they can check it.
+async function callEmailApi(name, payload) {
+  const { data: { session } } = await sb.auth.getSession();
+  const res = await fetch(`/api/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Email failed (${res.status})`);
+  return body;
+}
+
+const SEEN_STATUS_KEY = 'cc-photo-status-seen';
+function readSeenStatuses() {
+  try { return JSON.parse(localStorage.getItem(SEEN_STATUS_KEY)) || {}; } catch (e) { return {}; }
+}
+
 function setParticipant(row) {
   if (!row) { state.currentParticipantId = null; return null; }
   const p = toParticipant(row);
@@ -103,7 +128,9 @@ async function prepareUpload(file) {
   try {
     const bitmap = await createImageBitmap(file);
     const scale = Math.min(1, MAX_UPLOAD_EDGE / Math.max(bitmap.width, bitmap.height));
-    if (scale === 1 && file.size < 2_500_000 && /jpe?g/i.test(file.type)) return { blob: file, ext: 'jpg', type: 'image/jpeg' };
+    // Only light JPEGs go up untouched; heavier ones are re-saved even when
+    // they're already small enough, so voting cards stay quick to load.
+    if (scale === 1 && file.size < 1_000_000 && /jpe?g/i.test(file.type)) return { blob: file, ext: 'jpg', type: 'image/jpeg' };
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(bitmap.width * scale);
     canvas.height = Math.round(bitmap.height * scale);
@@ -125,16 +152,26 @@ async function uploadPhoto(folder, file) {
 
 // ---- loading ----
 
+// Approved voter notes, without who wrote them. Until migrations-005 is run
+// the function doesn't exist, which just means nothing is shared yet.
+async function loadPublicNotes() {
+  const { data, error } = await sb.rpc('public_notes');
+  if (error) return [];
+  return data.map((r) => ({ imageId: r.image_id, note: r.note, votedAt: r.voted_at }));
+}
+
 async function loadStudent() {
   const { data: { user } } = await sb.auth.getUser();
-  const [participant, images, votes, notices, reads] = await Promise.all([
+  const [participant, images, votes, notices, reads, publicNotes] = await Promise.all([
     q(sb.from('participants').select('*').eq('auth_uid', user.id).maybeSingle()),
     q(sb.from('images').select('*')),
     q(sb.from('votes').select('*')),
     q(sb.from('notices').select('*').eq('status', 'live')),
     q(sb.from('notice_reads').select('*')),
+    loadPublicNotes(),
   ]);
   const next = emptyState();
+  next.publicNotes = publicNotes;
   next.images = byId(images, toImage);
   next.votes = votes.map(toVote);
   next.notices = notices.map(toNotice);
@@ -182,8 +219,10 @@ export const Store = {
   async init(nextMode) {
     mode = nextMode;
     if (!this.configured) throw new Error('Campus Canvas is not connected to its database yet.');
+    // Implicit flow so a magic link works even when it's opened in a
+    // different browser from the one that asked for it.
     sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-      auth: { storageKey: `cc-${mode}-auth`, persistSession: true, autoRefreshToken: true },
+      auth: { storageKey: `cc-${mode}-auth`, persistSession: true, autoRefreshToken: true, flowType: 'implicit' },
     });
     if (mode === 'student') {
       const { data: { session } } = await sb.auth.getSession();
@@ -192,6 +231,11 @@ export const Store = {
         if (error) throw new Error(`Could not start a session: ${error.message}`);
       }
       await loadStudent();
+      // Back from a magic link: the session now carries a verified email, so
+      // pick up the account that belongs to it.
+      if (!this.currentParticipant() && session?.user?.email) {
+        try { await this.claimAccount(); loginResult = 'ok'; } catch (err) { loginResult = err.message; }
+      }
     } else if (await this.isAdminSession()) {
       await loadAdmin();
     }
@@ -240,12 +284,70 @@ export const Store = {
     return state.currentParticipantId ? state.participants[state.currentParticipantId] : null;
   },
 
-  async register(name, email) {
-    await rpc('register_participant', { p_name: name, p_email: email });
+  // @queensu.ca addresses are approved straight away; any other address is
+  // 'pending' until an admin approves or rejects it.
+  async register(name, email, ageConfirmed) {
+    try {
+      await rpc('register_participant', { p_name: name, p_email: email, p_age_confirmed: ageConfirmed });
+    } catch (err) {
+      // Database not migrated yet (migrations-003): fall back to the old call.
+      if (!/could not find the function/i.test(err.message)) throw err;
+      await rpc('register_participant', { p_name: name, p_email: email });
+    }
     // An existing email may bring votes, images and reads with it.
     await loadStudent();
     changed();
     return this.currentParticipant();
+  },
+
+  // Returning participants log in with a magic link (or the code in the
+  // same email). Supabase Auth sends it; nothing happens here until they use it.
+  async sendLoginLink(email) {
+    // Supabase waits on its mail server before answering; if that stalls,
+    // stop waiting rather than leave the button spinning.
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(
+      'Sending the email is taking too long. Please try again in a minute. If an email does arrive, you can still use it.',
+    )), 20000));
+    const { error } = await Promise.race([
+      sb.auth.signInWithOtp({ email, options: { emailRedirectTo: `${location.origin}${location.pathname}?login=1` } }),
+      timeout,
+    ]);
+    if (error) throw new Error(/sending|smtp|email/i.test(error.message) && error.status >= 500
+      ? 'We couldn’t send the log-in email just now. Please try again in a minute.'
+      : error.message);
+  },
+
+  async verifyLoginCode(email, code) {
+    const { error } = await sb.auth.verifyOtp({ email, token: code, type: 'email' });
+    if (error) throw new Error(/expired|invalid/i.test(error.message) ? 'That code has expired or isn’t right. Send a new one.' : error.message);
+    return this.claimAccount();
+  },
+
+  async claimAccount() {
+    await rpc('claim_participant');
+    await loadStudent();
+    changed();
+    return this.currentParticipant();
+  },
+
+  // Leaves this browser as a fresh visitor. The account itself stays; the
+  // student gets back in with a log-in link to the same email.
+  async signOut() {
+    await sb.auth.signOut();
+    const { error } = await sb.auth.signInAnonymously();
+    if (error) throw new Error(`Could not start a new session: ${error.message}`);
+    await loadStudent();
+    changed();
+  },
+
+  takeLoginResult() {
+    const r = loginResult;
+    loginResult = null;
+    return r;
+  },
+
+  isApproved() {
+    return this.currentParticipant()?.access === 'approved';
   },
 
   async acceptTerms() {
@@ -256,6 +358,23 @@ export const Store = {
   hasAcceptedCurrentTerms() {
     const p = this.currentParticipant();
     return !!(p && p.termsVersion === TERMS_VERSION);
+  },
+
+  // ---- participant access (non-@queensu.ca sign-ups) ----
+  pendingParticipants() {
+    return Object.values(state.participants).filter((p) => p.access === 'pending')
+      .sort((a, b) => a.registeredAt.localeCompare(b.registeredAt));
+  },
+
+  async setParticipantAccess(participantId, access) {
+    await rpc('admin_set_participant_access', { p_participant: participantId, p_access: access });
+    await loadAdmin();
+    changed();
+  },
+
+  // Emails an approved non-@queensu.ca student that they can now come in.
+  async emailAccessApproved(participantId) {
+    await callEmailApi('notify-access', { participantId });
   },
 
   async deleteMyData() {
@@ -274,11 +393,17 @@ export const Store = {
 
   // entries: [{ file, title, description }] x3. Resolves only once the
   // database has all three rows (FR-016); uploads are cleaned up on failure.
-  async submitEntry(entries) {
+  // onProgress(step) reports 1..3 as each photo uploads, then 4 while the
+  // entry itself is saved.
+  async submitEntry(entries, onProgress = () => {}) {
     const { data: { user } } = await sb.auth.getUser();
     const uploaded = [];
     try {
-      for (const e of entries) uploaded.push(await uploadPhoto(`submissions/${user.id}`, e.file));
+      for (const e of entries) {
+        onProgress(uploaded.length + 1);
+        uploaded.push(await uploadPhoto(`submissions/${user.id}`, e.file));
+      }
+      onProgress(entries.length + 1);
       const items = entries.map((e, i) => ({
         storage_path: uploaded[i].path, photo_url: uploaded[i].url,
         title: e.title.trim(), description: e.description.trim(),
@@ -290,6 +415,38 @@ export const Store = {
     }
     await loadStudent();
     changed();
+  },
+
+  // Swap a rejected photo for a new one; it goes back to review.
+  async replaceRejected(imageId, { file, title, description }) {
+    const { data: { user } } = await sb.auth.getUser();
+    const up = await uploadPhoto(`submissions/${user.id}`, file);
+    let oldPath;
+    try {
+      oldPath = await rpc('replace_rejected_image', {
+        p_image: imageId, p_storage_path: up.path, p_photo_url: up.url,
+        p_title: title.trim(), p_description: description.trim(),
+      });
+    } catch (err) {
+      await sb.storage.from(BUCKET).remove([up.path]);
+      throw err;
+    }
+    if (oldPath) await sb.storage.from(BUCKET).remove([oldPath]);
+    await loadStudent();
+    changed();
+  },
+
+  // Reviews the student hasn't been told about yet. What they've seen is kept
+  // per browser; at worst a student on a new device hears about it twice.
+  photoUpdates() {
+    const seen = readSeenStatuses();
+    return this.myImages().filter((i) => i.status !== 'pending' && seen[i.id] !== i.status);
+  },
+
+  markPhotoUpdatesSeen() {
+    const seen = readSeenStatuses();
+    for (const i of this.myImages()) seen[i.id] = i.status;
+    try { localStorage.setItem(SEEN_STATUS_KEY, JSON.stringify(seen)); } catch (e) { /* storage blocked */ }
   },
 
   // ---- review (FR-020..FR-023, AR-003) ----
@@ -305,6 +462,14 @@ export const Store = {
     await rpc('admin_review_image', { p_image: imageId, p_status: status, p_note: note ?? null });
     await loadAdmin();
     changed();
+  },
+
+  // Emails the student once none of their photos are waiting for review
+  // (api/notify-review.js). Resolves to false when there's nothing to send yet.
+  async notifyIfReviewed(participantId) {
+    if (!participantId || this.allImages().some((i) => i.participantId === participantId && i.status === 'pending')) return false;
+    await callEmailApi('notify-review', { participantId });
+    return true;
   },
 
   async updateImageDetails(imageId, { title, description }) {
@@ -337,9 +502,11 @@ export const Store = {
     return new Set(state.votes.filter((v) => v.participantId === participantId).map((v) => v.imageId));
   },
 
+  // Every accepted photo, the participant's own included, that they haven't
+  // voted on yet.
   votingQueue(participantId = state.currentParticipantId) {
     const voted = this.votedImageIds(participantId);
-    return this.acceptedImages().filter((img) => !voted.has(img.id) && img.participantId !== participantId);
+    return this.acceptedImages().filter((img) => !voted.has(img.id));
   },
 
   // Optimistic: the card advances and points move immediately; the server's
@@ -348,7 +515,10 @@ export const Store = {
     const p = this.currentParticipant();
     if (!p) throw new Error('Not registered');
     if (state.votes.some((v) => v.participantId === p.id && v.imageId === imageId)) return;
-    const vote = { participantId: p.id, imageId, value, note: note || '', votedAt: new Date().toISOString() };
+    const vote = {
+      participantId: p.id, imageId, value, note: note || '', votedAt: new Date().toISOString(),
+      noteStatus: value === 'note' ? 'pending' : 'private',
+    };
     const before = p.points;
     state.votes.push(vote);
     p.points += value === 'note' ? 3 : 1;
@@ -364,17 +534,37 @@ export const Store = {
       });
   },
 
-  async resetMyVotes() {
-    const points = await rpc('reset_my_votes');
-    const p = this.currentParticipant();
-    state.votes = state.votes.filter((v) => v.participantId !== p.id);
-    p.points = points;
-    changed();
+  // What the current participant voted on, newest first, with the photo.
+  myVotes() {
+    const id = state.currentParticipantId;
+    return state.votes.filter((v) => v.participantId === id && state.images[v.imageId])
+      .sort((a, b) => b.votedAt.localeCompare(a.votedAt))
+      .map((v) => ({ ...v, image: state.images[v.imageId] }));
   },
 
-  async setTestPoints(target) {
-    const p = this.currentParticipant();
-    p.points = await rpc('set_test_points', { p_target: target });
+  // Everything the current participant can vote on (every accepted photo,
+  // their own included), voted or not.
+  votablePhotos() {
+    return this.acceptedImages();
+  },
+
+  // Approved notes on a photo, shown to everyone without a name.
+  notesFor(imageId) {
+    return state.publicNotes.filter((n) => n.imageId === imageId);
+  },
+
+  // Voters' written notes, newest first, with the photo and who wrote it.
+  allNotes() {
+    return state.votes.filter((v) => v.value === 'note' && v.note)
+      .sort((a, b) => b.votedAt.localeCompare(a.votedAt))
+      .map((v) => ({ ...v, image: state.images[v.imageId], author: state.participants[v.participantId] }));
+  },
+
+  // Admin: share a note anonymously ('approved'), keep it hidden
+  // ('rejected'), or put it back in the queue ('pending').
+  async setNoteStatus(participantId, imageId, status) {
+    await rpc('admin_set_note_status', { p_participant: participantId, p_image: imageId, p_status: status });
+    await loadAdmin();
     changed();
   },
 
@@ -426,11 +616,21 @@ export const Store = {
   },
 
   async publishNotice({ title, body, category, ctaLabel, url }) {
-    await rpc('admin_publish_notice', {
+    const notice = await rpc('admin_publish_notice', {
       p_title: title, p_body: body, p_category: category || 'Announcement', p_cta_label: ctaLabel || '', p_url: url || '',
     });
     await loadAdmin();
     changed();
+    return notice;
+  },
+
+  // Emails a published notice to every approved student; resolves to how many.
+  async emailNotice(noticeId) {
+    return (await callEmailApi('notify-notice', { noticeId })).sent;
+  },
+
+  emailableStudents() {
+    return Object.values(state.participants).filter((p) => p.access === 'approved' && !p.isSeed).length;
   },
 
   async retireNotice(noticeId) {

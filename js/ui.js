@@ -65,11 +65,79 @@ export function busy(button, label) {
   return () => { button.disabled = wasDisabled; button.innerHTML = original; };
 }
 
+// Starts downloading photos before they're shown, so the next voting card
+// appears instantly instead of loading after each vote. Only the most recent
+// few are held on to; the browser cache keeps the files themselves.
+const warmed = new Map();
+export function preloadPhotos(images) {
+  for (const img of images) {
+    const url = img && img.photo;
+    if (!url || url.startsWith('linear-gradient') || warmed.has(url)) continue;
+    const el = new Image();
+    el.decoding = 'async';
+    el.src = url;
+    warmed.set(url, el);
+    if (warmed.size > 8) warmed.delete(warmed.keys().next().value);
+  }
+}
+
 export function statusScreen(root, title, body) {
   root.innerHTML = `
     <div class="screen" style="align-items:center; justify-content:center; text-align:center; padding:40px 32px;">
-      <img src="assets/monogram.png" alt="ArtUP" style="height:28px; margin-bottom:24px;" />
+      <img src="assets/monogram.png" alt="ArtUP" style="height:28px; width:auto; margin-bottom:24px;" />
       <h2 class="h-serif" style="font-size:26px; margin-bottom:10px;">${esc(title)}</h2>
-      <p style="margin:0; font-size:14px; font-weight:300; line-height:1.6; color:#5B5449;">${esc(body)}</p>
+      <p style="margin:0; font-size:15.5px; font-weight:300; line-height:1.6; color:#5B5449;">${esc(body)}</p>
     </div>`;
+}
+
+// A student's three photos with where each one stands, and a way to replace
+// any that weren't accepted.
+const STATUS_LABEL = { accepted: 'In voting', pending: 'In review', rejected: 'Not accepted' };
+export function entryGridHTML(images, dark = false) {
+  const colour = dark
+    ? { accepted: '#7FB7A5', pending: '#9A8F79', rejected: '#E08A74' }
+    : { accepted: '#2E6B5C', pending: '#8C8375', rejected: '#C4543A' };
+  return `<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px; text-align:left;">
+    ${images.map((img) => `
+      <div>
+        <div style="width:100%; aspect-ratio:.8; border-radius:12px; background:#EDE6D8 center/cover url('${esc(img.photo)}');"></div>
+        <p style="margin:7px 0 0; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:${colour[img.status]};">${STATUS_LABEL[img.status]}</p>
+        ${img.status === 'rejected' ? `<a href="#/replace?id=${img.id}" style="display:inline-block; margin-top:3px; font-size:13px; color:${dark ? '#D9B85C' : '#A6842C'}; text-decoration:underline;">Replace</a>` : ''}
+      </div>`).join('')}
+  </div>`;
+}
+
+// Tells a student how the curators' review of their photos went, the first
+// time they open the app after it happens.
+export function photoUpdateSheet(images, onSee, onReplace) {
+  if (document.getElementById('photo-update')) return;
+  const accepted = images.filter((i) => i.status === 'accepted').length;
+  const rejected = images.length - accepted;
+  const headline = !rejected ? (accepted === 1 ? 'Your photo is in voting!' : 'Your photos are in voting!')
+    : !accepted ? 'An update on your photos' : 'Your photos have been reviewed';
+  const el = document.createElement('div');
+  el.id = 'photo-update';
+  el.className = 'sheet-overlay';
+  el.innerHTML = `
+    <div class="sheet" style="padding:26px 24px 28px;">
+      <p class="eyebrow" style="letter-spacing:.20em; margin-bottom:6px;">Curator review</p>
+      <h3 class="h-serif" style="font-size:25px; line-height:1.15; margin-bottom:18px;">${headline}</h3>
+      <div style="display:flex; flex-direction:column; gap:10px; margin-bottom:${rejected ? 14 : 22}px;">
+        ${images.map((img) => `
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="flex:none; width:48px; height:48px; border-radius:10px; background:#EDE6D8 center/cover url('${esc(img.photo)}');"></div>
+            <span style="flex:1; min-width:0; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(img.title)}</span>
+            <span style="flex:none; font-size:12px; letter-spacing:.10em; text-transform:uppercase; color:${img.status === 'accepted' ? '#2E6B5C' : '#C4543A'};">${img.status === 'accepted' ? 'In voting' : 'Not accepted'}</span>
+          </div>`).join('')}
+      </div>
+      ${rejected ? `<p style="margin:0 0 22px; font-size:14px; font-weight:300; line-height:1.6; color:#5B5449;">Every photo is checked against the contest guidelines, and ones that don’t meet them aren’t added to voting. You can replace ${rejected === 1 ? 'it' : 'them'} with a new photo.</p>` : ''}
+      <button class="btn btn-gold" id="photo-update-see" style="margin-bottom:12px;">${rejected ? 'Replace photo' : 'See my submissions'}</button>
+      <button class="btn btn-outline" id="photo-update-close">Close</button>
+    </div>`;
+  document.body.appendChild(el);
+  const close = () => el.remove();
+  el.querySelector('#photo-update-close').addEventListener('click', close);
+  el.addEventListener('click', (e) => { if (e.target === el) close(); });
+  const firstRejected = images.find((i) => i.status !== 'accepted');
+  el.querySelector('#photo-update-see').addEventListener('click', () => { close(); if (firstRejected) onReplace(firstRejected); else onSee(); });
 }
