@@ -2,7 +2,7 @@ import { Store } from '../store.js';
 import { Router } from '../router.js';
 import { bottomNav, avatarBtn, toast, busy, esc } from '../ui.js';
 
-const CATEGORIES = ['My submission', 'Voting', 'Prizes', 'Something else'];
+const CATEGORIES = ['Submitting a photo', 'Using Campus Canvas', 'Privacy', 'The contest', 'Something else'];
 let category = CATEGORIES[0];
 let submitted = false;
 

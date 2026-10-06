@@ -25,7 +25,8 @@ Router.register('account', account);
 Router.register('terms', terms);
 
 Router.setGuard((name) => {
-  if (NEEDS_PARTICIPANT.has(name) && !Store.currentParticipant()) return '#/register';
+  // Deep links to feedback (e.g. from a nudge email) return there after sign-in.
+  if (NEEDS_PARTICIPANT.has(name) && !Store.currentParticipant()) return name === 'feedback' ? '#/register?next=feedback' : '#/register';
   if (NEEDS_TERMS.has(name) && !Store.hasAcceptedCurrentTerms()) return '#/terms-gate';
   return null;
 });

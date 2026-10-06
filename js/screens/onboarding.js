@@ -54,7 +54,8 @@ export function landing(root) {
   });
 }
 
-export function register(root) {
+export function register(root, { params } = {}) {
+  const toFeedback = params?.next === 'feedback';
   root.innerHTML = `
     <div class="screen">
       <div class="topbar">
@@ -79,7 +80,7 @@ export function register(root) {
         </div>
       </div>
       <div style="padding:18px 24px 28px; border-top:1px solid rgba(27,25,22,.08);">
-        <button class="btn btn-gold" id="reg-continue">Continue${intent === 'submit' ? ' to terms' : ''}</button>
+        <button class="btn btn-gold" id="reg-continue">Continue${intent === 'submit' && !toFeedback ? ' to terms' : ''}</button>
       </div>
     </div>`;
 
@@ -102,7 +103,8 @@ export function register(root) {
       toast(err.message, 3200);
       return;
     }
-    if (intent === 'vote') Router.go('#/vote');
+    if (toFeedback) Router.go('#/feedback');
+    else if (intent === 'vote') Router.go('#/vote');
     else Router.go(Store.hasAcceptedCurrentTerms() ? '#/submit' : '#/terms-gate');
   });
 }
