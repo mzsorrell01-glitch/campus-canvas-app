@@ -629,6 +629,11 @@ export const Store = {
     return (await callEmailApi('notify-notice', { noticeId })).sent;
   },
 
+  // Sends the nudge email (api/_nudge-email.js) to one address as a test.
+  async sendNudgeTest(email) {
+    await callEmailApi('notify-nudge', { testTo: email });
+  },
+
   emailableStudents() {
     return Object.values(state.participants).filter((p) => p.access === 'approved' && !p.isSeed).length;
   },

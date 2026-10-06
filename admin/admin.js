@@ -420,6 +420,13 @@ function noticesTab() {
         </label>
         <button id="n-publish" class="btn btn-gold" style="width:auto; height:40px; padding:0 20px; font-size:11px;">Publish</button>
 
+        <p class="eyebrow" style="letter-spacing:.18em; margin-top:30px;">Nudge email &middot; test send</p>
+        <p style="margin:0 0 10px; font-size:13px; font-weight:300; color:#4A443A;">Sends the “more Queen’s memories” email to one address so you can check it in a real inbox. It doesn’t go to students.</p>
+        <div style="display:flex; gap:10px;">
+          <input id="nudge-test-to" type="email" style="${INPUT} height:40px; font-size:14px; flex:1;" placeholder="name@example.com" />
+          <button id="nudge-test-send" class="btn btn-outline" style="width:auto; height:40px; padding:0 20px; font-size:11px;">Send test</button>
+        </div>
+
         <p class="eyebrow" style="letter-spacing:.18em; margin-top:30px;">Published</p>
         <div style="border-top:1px solid rgba(27,25,22,.10);">
           ${list.map((n) => `<div style="display:flex; align-items:center; justify-content:space-between; padding:14px 0; border-bottom:1px solid rgba(27,25,22,.07); font-size:13.5px;">
@@ -687,6 +694,15 @@ function wireEvents() {
         .then((sent) => toast(`Notice emailed to ${sent} student${sent === 1 ? '' : 's'}.`, 3600))
         .catch((err) => toast(`Notice published, but the email didn’t go out: ${err.message}`, 6000));
     });
+  });
+  root.querySelector('#nudge-test-send')?.addEventListener('click', (e) => {
+    const to = root.querySelector('#nudge-test-to').value.trim();
+    if (!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(to)) { toast('Add one email address to send the test to.'); return; }
+    const restore = busy(e.currentTarget, 'Sending…');
+    Store.sendNudgeTest(to)
+      .then(() => toast(`Test sent to ${to}.`, 3600))
+      .catch((err) => toast(`The test didn’t send: ${err.message}`, 6000))
+      .finally(restore);
   });
   root.querySelectorAll('[data-retire]').forEach((el) => el.addEventListener('click', (e) => {
     act(e.currentTarget, '…', () => Store.retireNotice(el.dataset.retire), 'Notice retired.');
